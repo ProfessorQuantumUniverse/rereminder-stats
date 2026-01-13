@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "label": "F-Droid Downloads",
   "message": "0",
-  "color": "blue",
-  "cacheSeconds": 86400
+  "color": "inactive",
+  "cacheSeconds": 3600,
+  "lastUpdated": "2026-01-13 17:21:35"
 }
