@@ -1,0 +1,30 @@
+name: Update Stats
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Täglich um 6 Uhr morgens
+  workflow_dispatch:    # Erlaubt manuellen Start per Klick
+
+jobs:
+  update-json:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Erlaubt dem Bot, die JSON-Datei zu committen
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          
+      - name: Install dependencies
+        run: pip install requests
+        
+      - name: Run script
+        run: python update_stats.py
+        
+      - name: Commit result
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update stats json"
+          file_pattern: "fdroid-shield.json"
