@@ -1,25 +1,20 @@
 import requests
 import json
 import sys
-import time
+import datetime
 
 # --- KONFIGURATION ---
 PACKAGE_NAME = "com.olaf.rereminder"
 OUTPUT_FILE = "fdroid-shield.json"
-
-# Die Basis-URL für die Metriken
 BASE_URL = "https://fdroid.gitlab.io/metrics/"
 
-# Die wichtigsten Mirror-Server, die Statistiken liefern.
-# http02 und http03 sind die Haupt-Verteiler.
+# http02 und http03 sind die Hauptquellen
 MIRRORS = [
     "http02.fdroid.net",
-    "http03.fdroid.net",
-    "mirror.f-droid.org" # Manchmal relevant
+    "http03.fdroid.net"
 ]
 
 def format_number(num):
-    """Formatiert Zahlen (1500 -> 1.5k)"""
     if num >= 1_000_000:
         return f"{num / 1_000_000:.1f}M"
     if num >= 1_000:
@@ -27,100 +22,92 @@ def format_number(num):
     return str(num)
 
 def get_data_from_mirror(mirror):
-    """Lädt alle Logs eines Mirrors und summiert die Downloads für das Paket."""
-    print(f"\n🔵 Starte Analyse für Mirror: {mirror}")
-    
-    mirror_index_url = f"{BASE_URL}{mirror}/index.json"
-    total_mirror_downloads = 0
-    found_any = False
+    print(f"\n🔵 --- Mirror: {mirror} ---")
+    index_url = f"{BASE_URL}{mirror}/index.json"
+    total_mirror = 0
     
     try:
-        # 1. Index laden
-        r = requests.get(mirror_index_url, timeout=10)
-        if r.status_code == 404:
-            print(f"   ⚠️ Kein Index gefunden (404).")
+        r = requests.get(index_url, timeout=15)
+        if r.status_code != 200:
+            print(f"   ⚠️ Index nicht erreichbar ({r.status_code})")
             return 0
-        r.raise_for_status()
         
         file_list = r.json()
-        # Sortieren, damit wir chronologisch vorgehen (optional, aber übersichtlicher)
-        file_list.sort()
+        if not file_list: return 0
         
-        print(f"   📂 {len(file_list)} Log-Dateien gefunden.")
+        # Wir nehmen ALLES was da ist. 
+        # Falls das Script zu lange läuft (Timeout), reduziere dies auf z.B. file_list[-50:]
+        file_list.sort()
+        # Wir nehmen die letzten 50 Logs (ca. 1 Jahr), um sicherzugehen
+        recent_files = file_list[-50:] 
+        
+        print(f"   📂 Scanne {len(recent_files)} Logs (von {len(file_list)} verfügbaren)...")
 
-        # 2. Jede Log-Datei abklappern
-        # ACHTUNG: Das können viele Dateien sein. Wir machen das sequenziell.
-        for filename in file_list:
-            if not filename.endswith(".json"):
-                continue
-
-            file_url = f"{BASE_URL}{mirror}/{filename}"
+        for filename in recent_files:
+            if not filename.endswith(".json"): continue
             
             try:
-                # Kurzer Sleep, um die Server nicht zu hämmern, falls es viele Requests sind
-                # (Bei GitHub Actions meist egal, aber nett sein schadet nicht)
-                # time.sleep(0.05) 
-                
-                log_r = requests.get(file_url, timeout=5)
-                if log_r.status_code != 200:
-                    continue
+                log_r = requests.get(f"{BASE_URL}{mirror}/{filename}", timeout=5)
+                if log_r.status_code != 200: continue
                 
                 data = log_r.json()
-                
-                # STRUKTUR CHECK:
-                # Meistens: { "packages": { "com.olaf.rereminder": 123 } }
+                file_hits = 0
+
+                # STRATEGIE 1: Suche in 'paths' (häufigste Form bei Raw Logs)
+                # Schlüssel sind z.B. "/repo/com.olaf.rereminder_102.apk"
+                paths = data.get("paths", {})
+                for path, count in paths.items():
+                    if PACKAGE_NAME in path and str(path).endswith(".apk"):
+                        file_hits += int(count)
+
+                # STRATEGIE 2: Suche in 'packages' (falls aggregiert)
                 packages = data.get("packages", {})
-                
                 if PACKAGE_NAME in packages:
-                    count = packages[PACKAGE_NAME]
-                    # Sicherstellen, dass es eine Zahl ist
-                    if isinstance(count, (int, float)):
-                        total_mirror_downloads += int(count)
-                        found_any = True
-                        # Optional: Print für Debugging, wenn man sehen will, wann was passiert
-                        # print(f"      + {count} Downloads in {filename}")
+                    file_hits += int(packages[PACKAGE_NAME])
+
+                # STRATEGIE 3: Root Level (selten, aber möglich)
+                if PACKAGE_NAME in data and isinstance(data[PACKAGE_NAME], (int, float)):
+                     file_hits += int(data[PACKAGE_NAME])
+
+                if file_hits > 0:
+                    # print(f"      + {file_hits} in {filename}") # Auskommentieren für weniger Spam
+                    total_mirror += file_hits
+
+            except Exception:
+                pass 
                 
-            except Exception as e:
-                # Einzelne Dateifehler ignorieren wir, um den Gesamtprozess nicht zu stoppen
-                print(f"   ❌ Fehler bei {filename}: {e}")
-                continue
-
     except Exception as e:
-        print(f"   ❌ Fehler beim Mirror {mirror}: {e}")
+        print(f"   ❌ Fehler: {e}")
         return 0
-
-    if found_any:
-        print(f"   ✅ Gefunden! Zwischensumme {mirror}: {total_mirror_downloads}")
-    else:
-        print(f"   ⚪ Keine Daten für {PACKAGE_NAME} auf diesem Mirror.")
-        
-    return total_mirror_downloads
+    
+    print(f"   ✅ Zwischensumme {mirror}: {total_mirror}")
+    return total_mirror
 
 def main():
-    print(f"🔍 Suche nach Statistiken für: {PACKAGE_NAME}")
-    
     grand_total = 0
     
+    # 1. Daten sammeln
     for mirror in MIRRORS:
         grand_total += get_data_from_mirror(mirror)
-        
+    
     print(f"\n==========================================")
-    print(f"📊 GESAMT DOWNLOADS (alle Mirrors): {grand_total}")
+    print(f"📊 FINALE SUMME: {grand_total}")
     print(f"==========================================")
 
-    # JSON erstellen
+    # 2. JSON schreiben (mit Timestamp für erzwungenen Commit)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     shield_data = {
         "schemaVersion": 1,
         "label": "F-Droid Downloads",
         "message": format_number(grand_total),
-        "color": "blue",
-        "cacheSeconds": 86400 
+        "color": "blue" if grand_total > 0 else "inactive",
+        "cacheSeconds": 3600,
+        "lastUpdated": now
     }
 
     with open(OUTPUT_FILE, "w") as f:
         json.dump(shield_data, f, indent=2)
-    
-    print(f"💾 Datei '{OUTPUT_FILE}' wurde gespeichert.")
 
 if __name__ == "__main__":
     main()
