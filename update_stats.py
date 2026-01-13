@@ -1,92 +1,101 @@
 import requests
 import json
 import sys
-from datetime import datetime
 
 # Konfiguration
+# Wir prüfen die Haupt-Mirrors für Downloads
+MIRRORS = [
+    "http02.fdroid.net",
+    "http03.fdroid.net",
+    "originserver.f-droid.org"
+]
 BASE_URL = "https://fdroid.gitlab.io/metrics/"
-INDEX_URL = f"{BASE_URL}index.json"
 PACKAGE_NAME = "com.olaf.rereminder"
 OUTPUT_FILE = "fdroid-shield.json"
+# Anzahl der letzten Log-Dateien, die pro Mirror geprüft werden (1 Log = 1 Woche)
+# 12 Wochen = ca. 3 Monate Rückblick
+LOGS_TO_CHECK = 12 
 
 def format_number(num):
-    """Formatiert Zahlen wie 1500 zu 1.5k"""
     if num >= 1_000_000:
         return f"{num / 1_000_000:.1f}M"
     if num >= 1_000:
         return f"{num / 1_000:.1f}k"
     return str(num)
 
-def get_latest_metrics_url():
-    """Lädt index.json und ermittelt die URL der neuesten Metrik-Datei"""
-    print(f"Lade Index von: {INDEX_URL}")
+def get_downloads_for_mirror(mirror):
+    print(f"--- Prüfe Mirror: {mirror} ---")
+    index_url = f"{BASE_URL}{mirror}/index.json"
+    total_mirror_downloads = 0
+    
     try:
-        r = requests.get(INDEX_URL)
+        # 1. Index laden (Liste der verfügbaren Datum-Logfiles)
+        r = requests.get(index_url)
+        if r.status_code == 404:
+            print(f"Kein Index gefunden für {mirror} (überspringe)")
+            return 0
         r.raise_for_status()
+        
         files = r.json()
-        
-        # Annahme: index.json ist eine Liste von Strings (Dateinamen/Pfade)
-        # Wir sortieren sie, um den aktuellsten Eintrag zu finden (meist Datumsformat YYYY-MM-DD)
         if not files:
-            print("Keine Dateien im Index gefunden.")
-            sys.exit(1)
+            return 0
             
-        # Sortieren (Datums-Strings sortieren sich lexikalisch korrekt)
+        # Sortieren und die neuesten X Dateien nehmen
         files.sort()
-        latest_file = files[-1]
-        
-        # Falls die Endung .json fehlt, fügen wir sie hinzu (je nach F-Droid Struktur)
-        if not latest_file.endswith(".json"):
-            latest_file += ".json"
+        recent_files = files[-LOGS_TO_CHECK:]
+        print(f"Analysiere {len(recent_files)} Logs von {recent_files[0]} bis {recent_files[-1]}")
+
+        # 2. Jedes Logfile laden und parsen
+        for filename in recent_files:
+            if not filename.endswith(".json"):
+                filename += ".json"
             
-        print(f"Neueste Datei identifiziert: {latest_file}")
-        return f"{BASE_URL}{latest_file}"
+            file_url = f"{BASE_URL}{mirror}/{filename}"
+            try:
+                # Timeout wichtig, damit es nicht ewig hängt
+                log_r = requests.get(file_url, timeout=10)
+                if log_r.status_code != 200:
+                    continue
+                    
+                data = log_r.json()
+                
+                # F-Droid Metriken haben die Pfade oft unter 'paths'
+                # Format: { "paths": { "/repo/com.olaf.rereminder_10.apk": 123, ... } }
+                paths = data.get("paths", {})
+                
+                for path, count in paths.items():
+                    # Wir suchen nach Pfaden, die den Paketnamen und .apk enthalten
+                    # Pfade sehen oft so aus: /repo/com.beispiel.app_102.apk
+                    if PACKAGE_NAME in path and path.endswith(".apk"):
+                        total_mirror_downloads += int(count)
+                        
+            except Exception as e:
+                print(f"Fehler bei Datei {filename}: {e}")
+                continue
+
     except Exception as e:
-        print(f"Fehler beim Laden des Index: {e}")
-        sys.exit(1)
+        print(f"Fehler beim Spiegel {mirror}: {e}")
+        return 0
+    
+    print(f"Downloads auf {mirror}: {total_mirror_downloads}")
+    return total_mirror_downloads
 
 def main():
-    # 1. URL der neuesten Daten holen
-    metrics_url = get_latest_metrics_url()
-    
-    # 2. Metriken laden
-    print(f"Lade Metriken von: {metrics_url}")
-    try:
-        r = requests.get(metrics_url)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"Fehler beim Laden der Metriken: {e}")
-        sys.exit(1)
-
-    # 3. Daten für das Paket suchen und summieren
     total_downloads = 0
     
-    if PACKAGE_NAME in data:
-        package_stats = data[PACKAGE_NAME]
-        print(f"Paket '{PACKAGE_NAME}' gefunden. Verarbeite Daten...")
-        
-        # Die Struktur ist oft: "YYYY-MM-DD": download_count
-        # Wir summieren alle numerischen Werte in diesem Dictionary
-        if isinstance(package_stats, dict):
-            for key, value in package_stats.items():
-                if isinstance(value, (int, float)):
-                    total_downloads += int(value)
-        elif isinstance(package_stats, int):
-            # Falls die Struktur vereinfacht ist und direkt die Summe enthält
-            total_downloads = package_stats
-    else:
-        print(f"WARNUNG: Paket '{PACKAGE_NAME}' nicht in der aktuellen Metrik-Datei gefunden.")
-        # Wir setzen 0 oder behalten den alten Wert (hier 0 für clean slate)
+    # Alle Mirrors abklappern
+    for mirror in MIRRORS:
+        total_downloads += get_downloads_for_mirror(mirror)
+    
+    print(f"\nGESAMT DOWNLOADS (letzte {LOGS_TO_CHECK} Wochen): {total_downloads}")
 
-    print(f"Downloads (letzter Zeitraum): {total_downloads}")
-
-    # 4. JSON für Shields.io erstellen
+    # JSON für Shields.io erstellen
     shield_data = {
         "schemaVersion": 1,
         "label": "F-Droid Downloads",
         "message": format_number(total_downloads),
-        "color": "blue"  # oder "brightgreen", etc.
+        "color": "blue",
+        "cacheSeconds": 86400 # Cache für 24h
     }
 
     with open(OUTPUT_FILE, "w") as f:
